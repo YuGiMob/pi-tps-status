@@ -1,14 +1,29 @@
 # pi-tps-status
 
-A [pi-coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension that shows a live tokens-per-second (TPS) widget in the pi status bar while the agent streams a response.
+Shows a live tokens-per-second (TPS) widget in the [pi-coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) status bar while the agent streams a response — configurable display modes, counting strategies, colors and end-of-stream behavior.
 
-## Features
+## What you get
 
-- **Live TPS meter** with a sliding-window rate, color-coded by speed tiers (`⚡ TPS: 42.1 tok/s [provider]`).
+- **Live TPS meter.** A sliding-window rate updated on every streamed chunk, color-coded by speed tier: `⚡ TPS: 42.1 tok/s [provider]`.
 - **TTFT and stats modes.** The status suffix can show time-to-first-token, total tokens / elapsed time, both, or neither.
-- **Three counting strategies.** `estimate` (chars/4), `direct` (per chunk), or `provider` (exact usage reported by the provider, back-dated across the stream window).
-- **Provider reconciliation.** Final provider token counts are merged with fallback estimates; tool-execution time is paused out of the rate.
-- **`/tps` command.** Interactive settings list (display mode, counting strategy, end-of-stream behavior) persisted to `settings.json` with atomic writes and validation.
+- **Three counting strategies.** `estimate` (chars ÷ 4), `direct` (one token per chunk), or `provider` (exact usage reported by the provider, back-dated across the stream window).
+- **Provider reconciliation.** When the provider reports final usage, the meter merges it with fallback estimates — so the displayed total matches the provider's number, not a guess.
+- **Tool time excluded.** While the agent runs a tool, the clock is paused; the rate reflects pure generation, not tool execution.
+- **`/tps` command.** An interactive settings list (display mode, counting strategy, end-of-stream behavior) persisted to `settings.json` with atomic writes and validation.
+
+## Quick start
+
+The widget appears automatically on session start:
+
+```text
+⚡ TPS: 42.1 tok/s [provider]
+```
+
+Run `/tps` to configure it:
+
+```text
+/tps
+```
 
 ## Installation
 
@@ -16,8 +31,114 @@ A [pi-coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/codin
 pi install npm:pi-tps-status
 ```
 
-## Usage
+From a local checkout:
 
-The widget appears automatically on session start. Run `/tps` to configure it.
+```bash
+pi install /path/to/pi-tps-status
+```
 
-Settings are stored under the `tokenSpeed` key in `settings.json` (display, tps thresholds and colors, sliding window, count strategy, end-of-stream behavior).
+## Display modes
+
+| Mode | Status bar shows |
+| --- | --- |
+| `tps` | `⚡ TPS: 42.1 tok/s [provider]` |
+| `ttft` | TPS plus `(TTFT: 812 ms)` |
+| `stats` | TPS plus `(1234 tok in 12.3s)` |
+| `full` | TPS plus `(1234 tok in 12.3s · TTFT: 812 ms)` |
+
+The source tag after the rate is `[provider]` (exact usage), `[est]` (chars ÷ 4), or `[chunk]` (per-chunk counting).
+
+## Speed tiers
+
+The rate is colored by four configurable thresholds (defaults: slow 0, medium 15, fast 30, blazing 45 tok/s):
+
+| Tier | Default color |
+| --- | --- |
+| slow | `#ff4444` |
+| medium | `#ffaa00` |
+| fast | `#00ff88` |
+| blazing | `#44ddff` |
+
+## Counting strategies
+
+| Strategy | How tokens are counted |
+| --- | --- |
+| `estimate` | `ceil(chars / 4)` per streamed delta. |
+| `direct` | One token per streamed chunk. |
+| `provider` | Only the provider's reported usage counts; fallback estimates are used to fill the gap until the first report. |
+
+`useProviderTokens` (default on) additionally prefers the provider's exact counts whenever they are reported, regardless of strategy. Final provider usage is back-dated across the stream window so the rate curve stays smooth instead of jumping at the end.
+
+## End-of-stream behavior
+
+| Behavior | After streaming stops |
+| --- | --- |
+| `average` | The widget shows the average rate over the whole generation. |
+| `last` | The widget keeps the last live (sliding-window) rate. |
+
+## Settings
+
+Settings live under the `tokenSpeed` key in `settings.json` in the agent directory, created on first change:
+
+```json
+{
+  "tokenSpeed": {
+    "display": "tps",
+    "tpsSlow": 0,
+    "tpsMedium": 15,
+    "tpsFast": 30,
+    "tpsBlazing": 45,
+    "colorSlow": "#ff4444",
+    "colorMedium": "#ffaa00",
+    "colorFast": "#00ff88",
+    "colorBlazing": "#44ddff",
+    "slidingWindow": 1000,
+    "useProviderTokens": true,
+    "countStrategy": "estimate",
+    "endTpsBehavior": "average"
+  }
+}
+```
+
+| Setting | Range / values | Default |
+| --- | --- | --- |
+| `display` | `tps` \| `ttft` \| `stats` \| `full` | `tps` |
+| `tpsSlow` / `tpsMedium` / `tpsFast` / `tpsBlazing` | 0–1,000,000, strictly ascending | 0 / 15 / 30 / 45 |
+| `colorSlow` … `colorBlazing` | `#rrggbb` | see above |
+| `slidingWindow` | 100–30,000 ms | 1000 |
+| `useProviderTokens` | `true` \| `false` | `true` |
+| `countStrategy` | `estimate` \| `direct` \| `provider` | `estimate` |
+| `endTpsBehavior` | `average` \| `last` | `average` |
+
+Writes are atomic (temp file + rename), and invalid values are rejected with a warning notification that names the offending key and the fallback used.
+
+## How the meter works
+
+- **Sliding window.** Token samples are kept for the configured window; the rate is the token delta over the sample span (minimum 250 ms before a rate is shown).
+- **Pause/resume.** Tool executions increment a counter; while it is non-zero the clock is paused, so tool time never dilutes the rate.
+- **Reconciliation.** At the end of a turn the provider's total output tokens replace the estimate, with any fallback-counted tokens that the provider didn't cover added on top.
+- **TTFT.** Measured from the user message to the first streamed delta (text, thinking or tool call).
+
+## Troubleshooting
+
+- **The widget shows `--`.** No stream has started yet, or the stream was shorter than the 250 ms minimum span. Send a message and watch it stream.
+- **The rate looks wrong.** Check the counting strategy: `estimate` and `direct` are approximations; `provider` (or `useProviderTokens: true`) uses the provider's exact numbers.
+- **Settings were rejected.** The notification lists the invalid keys and the defaults applied — fix the values in `settings.json` or re-run `/tps`.
+
+## Development
+
+Requires [Node.js](https://nodejs.org) ≥ 22.19 and npm.
+
+```bash
+npm install
+npm test
+npm run typecheck
+```
+
+## Credits
+
+- [badlogic](https://github.com/badlogic), pi-coding-agent and the TUI status-bar APIs
+
+## License
+
+[MIT](LICENSE)
