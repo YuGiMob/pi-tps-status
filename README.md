@@ -136,6 +136,9 @@ npm run typecheck
 
 ## Credits
 
+- [Gabriel Sanhueza](https://github.com/gsanhueza), [pi-token-speed](https://github.com/gsanhueza/pi-token-speed) — this extension is derived from it
+- [Anthony Fangqing](https://github.com/AnthonyFangqing), [pi-tps](https://github.com/AnthonyFangqing/pi-tps) — the pi port of the original TPS meter on which pi-token-speed builds
+- [Tarquinen](https://github.com/Tarquinen), [oc-tps](https://github.com/Tarquinen/oc-tps) — the original TPS extension this family traces back to
 - [badlogic](https://github.com/badlogic), pi-coding-agent and the TUI status-bar APIs
 
 ## License
