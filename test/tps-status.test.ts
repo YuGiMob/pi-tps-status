@@ -1,7 +1,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
-  getAgentDir: vi.fn(() => "/tmp"),
   getSettingsListTheme: vi.fn(),
 }));
 
@@ -9,7 +11,7 @@ vi.mock("@earendil-works/pi-tui", () => ({
   SettingsList: class {},
 }));
 
-import { TpsMeter, validateConfig, type TokenSpeedConfig } from "../index.js";
+import { SettingsStore, TpsMeter, validateConfig, type TokenSpeedConfig } from "../index.js";
 
 const baseConfig: TokenSpeedConfig = {
   display: "tps",
@@ -33,7 +35,7 @@ describe("validateConfig", () => {
     expect(config.display).toBe("tps");
     expect(config.slidingWindow).toBe(1000);
     expect(config.tpsSlow).toBe(0);
-    expect(config.countStrategy).toBe("estimate");
+    expect(config.countStrategy).toBe("provider");
     expect(errors).toEqual([]);
   });
 
@@ -58,7 +60,7 @@ describe("validateConfig", () => {
   it("falls back on invalid enum values", () => {
     const { config, errors } = validateConfig({ display: "bogus", countStrategy: "nope" });
     expect(config.display).toBe("tps");
-    expect(config.countStrategy).toBe("estimate");
+    expect(config.countStrategy).toBe("provider");
     expect(errors).toHaveLength(2);
   });
 
@@ -208,5 +210,84 @@ describe("TpsMeter", () => {
     vi.advanceTimersByTime(1000);
     meter.stop();
     expect(meter.tps).toBe(10);
+  });
+});
+
+describe("SettingsStore", () => {
+  async function withTempHome(run: (tmpHome: string) => Promise<void>): Promise<void> {
+    const tmpHome = await mkdtemp(join(tmpdir(), "pi-tps-status-config-test-"));
+    vi.stubEnv("HOME", tmpHome);
+    vi.stubEnv("XDG_CONFIG_HOME", "");
+    try {
+      await run(tmpHome);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(tmpHome, { recursive: true, force: true });
+    }
+  }
+
+  it("defaults when no config file exists", async () => {
+    await withTempHome(async () => {
+      const store = new SettingsStore();
+      await store.initialize();
+      expect(store.config.countStrategy).toBe("provider");
+      expect(store.validationErrors).toEqual([]);
+    });
+  });
+
+  it("persists updates to ~/.config/pi-tps-status/config.json", async () => {
+    await withTempHome(async (tmpHome) => {
+      const store = new SettingsStore();
+      await store.update({ display: "full" });
+      const raw = JSON.parse(
+        await readFile(join(tmpHome, ".config", "pi-tps-status", "config.json"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(raw.display).toBe("full");
+      expect(raw.countStrategy).toBe("provider");
+      const reloaded = new SettingsStore();
+      await reloaded.initialize();
+      expect(reloaded.config.display).toBe("full");
+    });
+  });
+
+  it("honors XDG_CONFIG_HOME when set", async () => {
+    await withTempHome(async (tmpHome) => {
+      const xdg = join(tmpHome, "xdg");
+      vi.stubEnv("XDG_CONFIG_HOME", xdg);
+      const store = new SettingsStore();
+      await store.update({ display: "stats" });
+      const raw = JSON.parse(
+        await readFile(join(xdg, "pi-tps-status", "config.json"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(raw.display).toBe("stats");
+    });
+  });
+
+  it("leaves no temp files behind", async () => {
+    await withTempHome(async (tmpHome) => {
+      const store = new SettingsStore();
+      await store.update({ display: "tps" });
+      await store.update({ display: "full" });
+      const entries = await readdir(join(tmpHome, ".config", "pi-tps-status"));
+      expect(entries).toEqual(["config.json"]);
+    });
+  });
+
+  it("falls back to defaults on a corrupted config file", async () => {
+    await withTempHome(async (tmpHome) => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const configDir = join(tmpHome, ".config", "pi-tps-status");
+        await mkdir(configDir, { recursive: true });
+        await writeFile(join(configDir, "config.json"), "{not json", "utf8");
+        const store = new SettingsStore();
+        await store.initialize();
+        expect(store.config.display).toBe("tps");
+        expect(store.validationErrors).toEqual([]);
+        expect(errorSpy).toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
   });
 });

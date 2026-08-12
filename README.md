@@ -9,7 +9,7 @@ Shows a live tokens-per-second (TPS) widget in the [pi-coding-agent](https://git
 - **Three counting strategies.** `estimate` (chars ÷ 4), `direct` (one token per chunk), or `provider` (exact usage reported by the provider, back-dated across the stream window).
 - **Provider reconciliation.** When the provider reports final usage, the meter merges it with fallback estimates — so the displayed total matches the provider's number, not a guess.
 - **Tool time excluded.** While the agent runs a tool, the clock is paused; the rate reflects pure generation, not tool execution.
-- **`/tps` command.** An interactive settings list (display mode, counting strategy, end-of-stream behavior) persisted to `settings.json` with atomic writes and validation.
+- **`/tps` command.** An interactive settings list (display mode, counting strategy, end-of-stream behavior) persisted to `config.json` with atomic writes and validation.
 
 ## Quick start
 
@@ -65,7 +65,7 @@ The rate is colored by four configurable thresholds (defaults: slow 0, medium 15
 | --- | --- |
 | `estimate` | `ceil(chars / 4)` per streamed delta. |
 | `direct` | One token per streamed chunk. |
-| `provider` | Only the provider's reported usage counts; fallback estimates are used to fill the gap until the first report. |
+| `provider` (default) | Only the provider's reported usage counts; fallback estimates are used to fill the gap until the first report. |
 
 `useProviderTokens` (default on) additionally prefers the provider's exact counts whenever they are reported, regardless of strategy. Final provider usage is back-dated across the stream window so the rate curve stays smooth instead of jumping at the end.
 
@@ -78,25 +78,23 @@ The rate is colored by four configurable thresholds (defaults: slow 0, medium 15
 
 ## Settings
 
-Settings live under the `tokenSpeed` key in `settings.json` in the agent directory, created on first change:
+Settings live in `~/.config/pi-tps-status/config.json`, created automatically when a setting is changed. On non-Windows platforms, the config directory honors `XDG_CONFIG_HOME` when set (falling back to `~/.config`); on Windows it always uses `~/.config`:
 
 ```json
 {
-  "tokenSpeed": {
-    "display": "tps",
-    "tpsSlow": 0,
-    "tpsMedium": 15,
-    "tpsFast": 30,
-    "tpsBlazing": 45,
-    "colorSlow": "#ff4444",
-    "colorMedium": "#ffaa00",
-    "colorFast": "#00ff88",
-    "colorBlazing": "#44ddff",
-    "slidingWindow": 1000,
-    "useProviderTokens": true,
-    "countStrategy": "estimate",
-    "endTpsBehavior": "average"
-  }
+  "display": "tps",
+  "tpsSlow": 0,
+  "tpsMedium": 15,
+  "tpsFast": 30,
+  "tpsBlazing": 45,
+  "colorSlow": "#ff4444",
+  "colorMedium": "#ffaa00",
+  "colorFast": "#00ff88",
+  "colorBlazing": "#44ddff",
+  "slidingWindow": 1000,
+  "useProviderTokens": true,
+  "countStrategy": "provider",
+  "endTpsBehavior": "average"
 }
 ```
 
@@ -107,10 +105,10 @@ Settings live under the `tokenSpeed` key in `settings.json` in the agent directo
 | `colorSlow` … `colorBlazing` | `#rrggbb` | see above |
 | `slidingWindow` | 100–30,000 ms | 1000 |
 | `useProviderTokens` | `true` \| `false` | `true` |
-| `countStrategy` | `estimate` \| `direct` \| `provider` | `estimate` |
+| `countStrategy` | `provider` \| `estimate` \| `direct` | `provider` |
 | `endTpsBehavior` | `average` \| `last` | `average` |
 
-Writes are atomic (temp file + rename), and invalid values are rejected with a warning notification that names the offending key and the fallback used.
+Writes are atomic (a UUID-named temp file with `0600` permissions, fsynced and renamed over the target, with stale temp files swept on the next write), and invalid values are rejected with a warning notification that names the offending key and the fallback used.
 
 ## How the meter works
 
@@ -123,7 +121,8 @@ Writes are atomic (temp file + rename), and invalid values are rejected with a w
 
 - **The widget shows `--`.** No stream has started yet, or the stream was shorter than the 250 ms minimum span. Send a message and watch it stream.
 - **The rate looks wrong.** Check the counting strategy: `estimate` and `direct` are approximations; `provider` (or `useProviderTokens: true`) uses the provider's exact numbers.
-- **Settings were rejected.** The notification lists the invalid keys and the defaults applied — fix the values in `settings.json` or re-run `/tps`.
+- **Settings were rejected.** The notification lists the invalid keys and the defaults applied — fix the values in `config.json` or re-run `/tps`.
+- **Settings moved.** Older versions stored settings under the `tokenSpeed` key in `~/.pi/agent/settings.json`; they now live in `~/.config/pi-tps-status/config.json` and are not migrated automatically.
 
 ## Development
 

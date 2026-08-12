@@ -7,10 +7,21 @@ import type {
   MessageEndEvent,
   MessageUpdateEvent,
 } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { SettingsList, type SettingItem } from "@earendil-works/pi-tui";
-import { readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 type DisplayMode = "tps" | "ttft" | "stats" | "full";
 type CountStrategy = "estimate" | "direct" | "provider";
@@ -34,7 +45,6 @@ export interface TokenSpeedConfig {
 }
 
 const STATUS_KEY = "tps";
-const SETTINGS_KEY = "tokenSpeed";
 const CHARS_PER_TOKEN = 4;
 const MIN_SPAN_MS = 250;
 const MIN_WINDOW_MS = 100;
@@ -57,7 +67,7 @@ const DEFAULT_CONFIG: TokenSpeedConfig = {
   colorBlazing: "#44ddff",
   slidingWindow: 1000,
   useProviderTokens: true,
-  countStrategy: "estimate",
+  countStrategy: "provider",
   endTpsBehavior: "average",
 };
 
@@ -168,10 +178,114 @@ export function validateConfig(raw: unknown): { config: TokenSpeedConfig; errors
   return { config, errors };
 }
 
-class SettingsStore {
+function homeBase(): string {
+  const envHome = process.env.HOME;
+  return envHome && envHome.length > 0 ? envHome : homedir();
+}
+
+function configBase(): string {
+  if (process.platform !== "win32") {
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg && xdg.length > 0) return xdg;
+  }
+  return join(homeBase(), ".config");
+}
+
+function configPath(): string {
+  return join(configBase(), "pi-tps-status", "config.json");
+}
+
+function errCode(error: unknown): string | undefined {
+  if (error instanceof Error) return (error as NodeJS.ErrnoException).code;
+  return undefined;
+}
+
+const TEMP_PREFIX = ".tmp-";
+const TEMP_UUID_RE =
+  /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const STALE_TEMP_MS = 60 * 60 * 1000;
+const sweptDirs = new Set<string>();
+
+async function sweepStaleTemps(dir: string): Promise<void> {
+  if (sweptDirs.has(dir)) return;
+  sweptDirs.add(dir);
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!entry.isFile() || !TEMP_UUID_RE.test(entry.name)) continue;
+      const tempPath = join(dir, entry.name);
+      try {
+        const stats = await stat(tempPath);
+        if (now - stats.mtimeMs > STALE_TEMP_MS) {
+          await rm(tempPath, { force: true });
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+async function syncDir(dir: string): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    const handle = await open(dir, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {}
+}
+
+async function writeAtomic(path: string, content: string): Promise<void> {
+  let existingMode: number | null = null;
+  try {
+    existingMode = (await stat(path)).mode & 0o7777;
+  } catch (error) {
+    if (errCode(error) !== "ENOENT") throw error;
+  }
+  const dir = dirname(path);
+  await sweepStaleTemps(dir);
+  await mkdir(dir, { recursive: true });
+  const tempPath = join(dir, `${TEMP_PREFIX}${randomUUID()}`);
+  const tempHandle = await open(tempPath, "wx", 0o600);
+  try {
+    await tempHandle.writeFile(content, "utf-8");
+    if (existingMode !== null) await tempHandle.chmod(existingMode);
+    await tempHandle.sync();
+  } catch (error) {
+    await tempHandle.close();
+    try {
+      await rm(tempPath, { force: true });
+    } catch {}
+    throw error;
+  }
+  await tempHandle.close();
+  try {
+    await rename(tempPath, path);
+    await syncDir(dir);
+  } catch (error) {
+    if (process.platform === "win32" && errCode(error) === "EPERM") {
+      try {
+        await writeFile(path, content, "utf-8");
+        return;
+      } finally {
+        try {
+          await rm(tempPath, { force: true });
+        } catch {}
+      }
+    }
+    try {
+      await rm(tempPath, { force: true });
+    } catch {}
+    throw error;
+  }
+}
+
+export class SettingsStore {
   private cached: TokenSpeedConfig = DEFAULT_CONFIG;
   private errors: string[] = [];
-  private readonly path = join(getAgentDir(), "settings.json");
+  private readonly path = configPath();
 
   get config(): TokenSpeedConfig {
     return this.cached;
@@ -182,24 +296,15 @@ class SettingsStore {
   }
 
   async initialize(): Promise<void> {
-    const raw = await this.readAll();
-    const result = validateConfig(raw === null ? undefined : raw[SETTINGS_KEY]);
+    const result = validateConfig(await this.readAll());
     this.cached = result.config;
     this.errors = result.errors;
   }
 
   async update(partial: Partial<TokenSpeedConfig>): Promise<void> {
-    const raw = await this.readAll();
-    if (raw === null) throw new Error(`Cannot read ${this.path}`);
-    const current =
-      raw[SETTINGS_KEY] !== null && typeof raw[SETTINGS_KEY] === "object"
-        ? (raw[SETTINGS_KEY] as Record<string, unknown>)
-        : {};
+    const current = (await this.readAll()) ?? {};
     const result = validateConfig({ ...current, ...partial });
-    const next = { ...raw, [SETTINGS_KEY]: result.config };
-    const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(next, null, 2), "utf8");
-    await rename(tmp, this.path);
+    await writeAtomic(this.path, JSON.stringify(result.config, null, 2));
     this.cached = result.config;
     this.errors = result.errors;
   }
@@ -207,7 +312,10 @@ class SettingsStore {
   private async readAll(): Promise<Record<string, unknown> | null> {
     try {
       return JSON.parse(await readFile(this.path, "utf8")) as Record<string, unknown>;
-    } catch {
+    } catch (error) {
+      if (errCode(error) !== "ENOENT") {
+        console.error("Config file corrupted, using defaults:", error);
+      }
       return null;
     }
   }
