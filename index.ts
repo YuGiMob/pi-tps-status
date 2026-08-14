@@ -71,10 +71,7 @@ const DEFAULT_CONFIG: TokenSpeedConfig = {
   endTpsBehavior: "average",
 };
 
-const TOGGLE_LABELS: Record<"on" | "off", string> = {
-  on: "On",
-  off: "Off",
-};
+const TOGGLE_VALUES = ["on", "off"] as const;
 
 function pickEnum<T extends string>(
   value: unknown,
@@ -178,17 +175,12 @@ export function validateConfig(raw: unknown): { config: TokenSpeedConfig; errors
   return { config, errors };
 }
 
-function homeBase(): string {
-  const envHome = process.env.HOME;
-  return envHome && envHome.length > 0 ? envHome : homedir();
-}
-
 function configBase(): string {
   if (process.platform !== "win32") {
     const xdg = process.env.XDG_CONFIG_HOME;
     if (xdg && xdg.length > 0) return xdg;
   }
-  return join(homeBase(), ".config");
+  return join(homedir(), ".config");
 }
 
 function configPath(): string {
@@ -237,6 +229,12 @@ async function syncDir(dir: string): Promise<void> {
   } catch {}
 }
 
+async function removeQuietly(path: string): Promise<void> {
+  try {
+    await rm(path, { force: true });
+  } catch {}
+}
+
 async function writeAtomic(path: string, content: string): Promise<void> {
   let existingMode: number | null = null;
   try {
@@ -255,9 +253,7 @@ async function writeAtomic(path: string, content: string): Promise<void> {
     await tempHandle.sync();
   } catch (error) {
     await tempHandle.close();
-    try {
-      await rm(tempPath, { force: true });
-    } catch {}
+    await removeQuietly(tempPath);
     throw error;
   }
   await tempHandle.close();
@@ -270,14 +266,10 @@ async function writeAtomic(path: string, content: string): Promise<void> {
         await writeFile(path, content, "utf-8");
         return;
       } finally {
-        try {
-          await rm(tempPath, { force: true });
-        } catch {}
+        await removeQuietly(tempPath);
       }
     }
-    try {
-      await rm(tempPath, { force: true });
-    } catch {}
+    await removeQuietly(tempPath);
     throw error;
   }
 }
@@ -516,7 +508,7 @@ export class TpsMeter {
   private pushSample(time: number, cum: number): void {
     this.samples.push({ t: time, cum });
     const cutoff = time - this.windowMs;
-    while (this.samples.length > 1 && this.samples[1].t < cutoff) {
+    while (this.samples.length > 1 && this.samples[0].t < cutoff) {
       this.samples.shift();
     }
   }
@@ -594,6 +586,11 @@ export class StatusRenderer {
   }
 }
 
+function notifyValidationErrors(ctx: ExtensionContext, errors: string[]): void {
+  if (errors.length === 0) return;
+  ctx.ui.notify(["[pi-tps-status]", ...errors].join("\n"), "warning");
+}
+
 class TpsCommands {
   constructor(
     private readonly meter: TpsMeter,
@@ -622,13 +619,10 @@ class TpsCommands {
     try {
       await settings.update(partial);
     } catch (error) {
-      ctx.ui.notify(`[pi-token-speed] Could not save settings: ${(error as Error).message}`, "error");
+      ctx.ui.notify(`[pi-tps-status] Could not save settings: ${(error as Error).message}`, "error");
       return;
     }
-    const errors = settings.validationErrors;
-    if (errors.length > 0) {
-      ctx.ui.notify(["[pi-token-speed]", ...errors].join("\n"), "warning");
-    }
+    notifyValidationErrors(ctx, settings.validationErrors);
     this.meter.configure(settings.config);
     this.renderer.update(ctx);
   }
@@ -647,7 +641,7 @@ class TpsCommands {
         label: "Use provider tokens",
         description: "Prefer the provider's exact token counts when reported",
         currentValue: config.useProviderTokens ? "on" : "off",
-        values: Object.keys(TOGGLE_LABELS),
+        values: [...TOGGLE_VALUES],
       },
       {
         id: "countStrategy",
@@ -675,10 +669,7 @@ class TpsEvents {
 
   async handleSessionStart(ctx: ExtensionContext): Promise<void> {
     await settings.initialize();
-    const errors = settings.validationErrors;
-    if (errors.length > 0) {
-      ctx.ui.notify(["[pi-token-speed]", ...errors].join("\n"), "warning");
-    }
+    notifyValidationErrors(ctx, settings.validationErrors);
     this.meter.configure(settings.config);
     this.renderer.initialize(ctx);
   }

@@ -132,6 +132,16 @@ describe("TpsMeter", () => {
     expect(meter.tps).toBe(10);
   });
 
+  it("does not let samples older than the window dilute the rate", () => {
+    meter.start();
+    meter.recordDelta("a".repeat(40));
+    vi.advanceTimersByTime(5000);
+    meter.recordDelta("a".repeat(40));
+    vi.advanceTimersByTime(1000);
+    meter.recordDelta("a".repeat(40));
+    expect(meter.tps).toBe(10);
+  });
+
   it("pauses tool execution time out of the rate", () => {
     meter.start();
     meter.pause();
