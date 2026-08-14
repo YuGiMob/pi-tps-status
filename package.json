@@ -1,6 +1,6 @@
 {
   "name": "pi-tps-status",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "description": "Pi extension: configurable tokens-per-second status widget with TTFT, token counts, and provider-usage reconciliation",
   "main": "index.ts",
